@@ -1,0 +1,6 @@
+name = NYGB - PDF Page Entity
+description = Lightweight Entity to track pages for Indexing
+core = 7.x
+package = NYGB
+
+files[] = includes/page_datacontroller.inc

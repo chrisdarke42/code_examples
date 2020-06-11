@@ -1,0 +1,18 @@
+<?php
+
+/**
+ * @file
+ * Update scripts for the NYGB PDF module.
+ */
+
+/**
+ * Implementations of hook_update_N().
+ */
+
+/**
+ * Rebuild the menu cache.
+ */
+function nygb_pdf_update_7100() {
+  variable_set('menu_rebuild_needed', TRUE);
+}
+

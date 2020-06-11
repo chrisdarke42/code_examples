@@ -1,0 +1,98 @@
+
+#search_results .result {
+  display: flex;
+  width: 100%;
+  margin-top: 10px;
+}
+
+#search_results .result .thumbnail {
+  padding-top:10px;
+  flex: 20%;
+}
+
+#search_results .result .content {
+  flex: 80%;
+  padding-left: 20px;
+}
+
+#search_results .es-devel-area pre {
+  font-size: 10px;
+  -moz-tab-size: 2;
+  -o-tab-size:   2;
+  tab-size:      2;
+  border: 2px solid #ed9300;
+  margin-top: 0;
+  margin-bottom: 0;
+  padding: 4px;
+}
+
+#search_results .search-rating .thumbs {
+  padding: 0 4px;
+}
+
+#search_results .es-devel-area .hidden {
+  display: none;
+}
+
+#search_results .result .content > p {
+  margin-bottom: 10px;
+}
+
+#search_results .result .content .result__missing {
+  font-size: 13px;
+  font-weight: bold;
+  color: #777;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+#search_results .result .content .result__missing-terms {
+  text-decoration: line-through;
+}
+
+#search_results .es-devel-button {
+  text-transform: uppercase;
+  background-color: #ed9300;
+  font-weight: bold;
+  color: white;
+  padding: 5px;
+  font-size: 10px;
+}
+
+#search_results .result .explain-area a.up-click {
+  padding: 8px;
+}
+
+#search_results .result .explain-area a i {
+  border: solid white;
+  border-width: 0 3px 3px 0;
+  display: inline-block;
+  padding: 2px;
+  margin-left: 8px;
+}
+
+#search_results .result .explain-area a i.up {
+  transform: rotate(-135deg);
+  -webkit-transform: rotate(-135deg);
+}
+
+pre.wrapped {
+  white-space: pre-wrap;       /* css-3 */
+  white-space: -moz-pre-wrap;  /* Mozilla, since 1999 */
+  white-space: -pre-wrap;      /* Opera 4-6 */
+  white-space: -o-pre-wrap;    /* Opera 7 */
+  word-wrap: break-word;
+}
+
+
+/* Admin styling tweaks */
+
+#edit-zsearch-boost-index-tours .fieldset-wrapper {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+#edit-zsearch-boost-index-tours .fieldset-wrapper .form-type-textfield {
+  margin: 8px;
+}

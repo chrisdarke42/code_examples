@@ -1,0 +1,8 @@
+name = NYGB - PDF Structured Data Entity
+description = Lightweight Entity to for structured data for Collections
+core = 7.x
+package = NYGB
+
+files[] = includes/StructuredData.inc
+;files[] = nygb_structured_data.test
+files[] = includes/MigrateHandler.inc

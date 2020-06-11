@@ -1,0 +1,426 @@
+<?php
+/**
+ * @file
+ * Code for the ZSearch feature.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function zsearch_menu() {
+  $items = array();
+
+  // Admin menu for search.
+  $items['admin/config/zicasso/zsearch'] = array(
+    'title' => 'ZSearch',
+    'description' => 'ZSearch settings and utilities.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('zsearch_admin_settings'),
+    'access arguments' => array('administer zsearch config'),
+    'file' => 'zsearch.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  // Admin menu for search.
+  $items['admin/config/zicasso/zsearch/settings'] = array(
+    'title' => 'Settings',
+    'description' => 'ZSearch settings and utilities.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('zsearch_admin_settings'),
+    'access arguments' => array('administer zsearch config'),
+    'file' => 'zsearch.admin.inc',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+  );
+
+  // Admin search page for testing.
+  $items['admin/config/zicasso/zsearch/test'] = array(
+    'title' => 'Test Search',
+    'description' => 'Search Form.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('zsearch_es_test_form'),
+    'access arguments' => array('administer zsearch config'),
+    'file' => 'zsearch.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  $items['admin/config/zicasso/zsearch/reindex/%'] = array(
+    'title' => 'ZSearch',
+    'description' => 'ZSearch ElasticSearch Re-index.',
+    'page callback' => '_zsearch_admin_es_batch_process',
+    'page arguments' => array(5),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'zsearch.admin.inc',
+  );
+
+  $items['search/defer/load/%node/%'] = array(
+    'page callback' => '_zsearch_get_deferred_content',
+    'page arguments' => array(3, 4),
+    'type' => MENU_CALLBACK,
+    'access arguments' => array('access content'),
+  );
+
+  if (module_exists('devel')) {
+    $items['node/%node/devel/elasticsearch'] = array(
+      'title'              => 'ElasticSearch',
+      'page callback'      => '_zsearch_es_node_info',
+      'page arguments'     => array(1),
+      'access arguments'   => array('access devel information'),
+      'file'               => 'zsearch.admin.inc',
+      'type'               => MENU_LOCAL_TASK,
+    );
+  }
+
+  $items['search/explain/%node/%'] = array(
+    'title'              => 'ElasticSearch',
+    'page callback'      => '_zsearch_es_explain_query',
+    'page arguments'     => array(2, 3),
+    'access arguments'   => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['search/rate/%/%'] = array(
+    'title'              => 'ElasticSearch',
+    'page callback'      => '_zsearch_es_rate_results',
+    'page arguments'     => array(2, 3),
+    'access arguments'   => array('access content'),
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['luxury-tours/search'] = array(
+    'title' => '',
+    'description' => 'Search Form',
+    'page callback' => 'zsearch_elasticsearch',
+    'file' => 'zsearch.page.inc',
+    'access callback' => array(TRUE),
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function zsearch_permission() {
+  return array(
+    'administer zsearch config' => array(
+      'title' => t('Administer ZSearch'),
+      'description' => t('Allow users to administer ZSearch Configuration'),
+      'restrict access' => TRUE,
+    ),
+  );
+}
+
+/**
+ * Implements hook_theme().
+ */
+function zsearch_theme() {
+  return array(
+    'zsearch_elasticsearch_summary' => array(
+      'variables' => array(
+        'num_results' => 0,
+        'page' => 1,
+      ),
+      'template' => 'templates/zsearch_elasticsearch_summary',
+    ),
+    'zsearch_elasticsearch_tour' => array(
+      'variables' => array('result' => array(), 'trigger' => FALSE),
+      'template' => 'templates/zsearch_elasticsearch_tour',
+    ),
+    'zsearch_elasticsearch_results' => array(
+      'variables' => array(
+        'results' => '',
+        'pager' => '',
+        'summary' => '',
+        'cache_id' => 0,
+        'debug' => '',
+      ),
+      'template' => 'templates/zsearch_elasticsearch_results',
+    ),
+    'zsearch_elasticsearch_form' => array(
+      'render element' => 'form',
+    ),
+    'zsearch_elasticsearch_tooltip' => array(
+      'variables' => array(
+        'classes' => '',
+      ),
+    ),
+    'zsearch_elasticsearch_search_tips' => array(
+      'variables' => array(
+        'classes' => '',
+      ),
+    ),
+    'zsearch_elasticsearch_form_footer_theme' => array(
+      'render element' => 'form',
+      'template' => 'templates/zsearch_elasticsearch_form_footer_theme',
+    ),
+    'zsearch_elasticsearch_error' => array(
+      'template' => 'templates/zsearch_elasticsearch_error',
+    ),
+    'zsearch_elasticsearch_rating' => array(
+      'template' => 'templates/zsearch_elasticsearch_rating',
+    ),
+  );
+}
+
+/**
+ * Implements hook_node_insert().
+ *
+ * @inheritdoc
+ */
+function zsearch_node_insert($node) {
+  $connectorName = NodeElasticsearchConnector::getIndexedClass($node);
+  if (isset($connectorName)) {
+    if (_zsearch_node_ready_for_index($node)) {
+      try {
+        $connector = NodeElasticsearchConnector::loadElasticSearchConnector($node);
+        if (isset($connector)) {
+          if ($connector->isValidForIndex($node->nid)) {
+            $connector->indexDocuments([$node->nid]);
+            drupal_set_message('Content indexed on ElasticSearch');
+          }
+          else {
+            drupal_set_message('Content not valid for indexing on ElasticSearch');
+          }
+        }
+      }
+      catch (Exception $e) {
+        drupal_set_message('Cannot index content due to ElasticSearch not being available at the moment.', 'error');
+      }
+    }
+  }
+}
+
+/**
+ * Return true if the node is in a state to be indexed.
+ *
+ * @param object $node
+ *   Node object.
+ *
+ * @return bool
+ *   Return true if node is ready to be indexed.
+ */
+function _zsearch_node_ready_for_index($node) {
+  if (
+    (!isset($node->workbench_moderation_state_new) && $node->status === 1) ||
+    (
+      (isset($node->workbench_moderation_state_new) && $node->workbench_moderation_state_new === 'published') &&
+      ((!$node->is_new && isset($node->workbench_moderation_state_current) && $node->workbench_moderation_state_current === 'published') || $node->is_new)
+    )
+  ) {
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/**
+ * Implements hook_module_implements_alter().
+ *
+ * Moving node update for this module to the end of the stack.
+ */
+function zsearch_module_implements_alter(&$implementations, $hook) {
+  if ($hook == 'node_update') {
+    $group = $implementations['zsearch'];
+    unset($implementations['zsearch']);
+    $implementations['zsearch'] = $group;
+  }
+}
+
+/**
+ * Implements hook_node_update().
+ *
+ * @inheritdoc
+ */
+function zsearch_node_update($node) {
+  $connectorName = NodeElasticsearchConnector::getIndexedClass($node);
+  if (isset($connectorName)) {
+    if (_zsearch_node_ready_for_index($node)) {
+      try {
+        $connector = NodeElasticsearchConnector::loadElasticSearchConnector($node);
+        if (isset($connector)) {
+          if ($connector->isValidForIndex($node->nid)) {
+            $connector->indexDocuments(array($node->nid));
+            drupal_set_message('Content indexed on ElasticSearch');
+          }
+          else {
+            $response = $connector->deleteDocuments(array($node->nid));
+            if (count($response) && $response[0] !== FALSE) {
+              drupal_set_message('Content removed from ElasticSearch');
+            }
+          }
+        }
+      }
+      catch (Exception $e) {
+        drupal_set_message('Cannot index content due to ElasticSearch not being available at the moment.', 'error');
+      }
+    }
+    // Else if the node is not in published mode...
+    elseif ($node->status === 0) {
+      // ...delete from index.
+      try {
+        $connector = NodeElasticsearchConnector::loadElasticSearchConnector($node);
+        if (isset($connector)) {
+          $connector->deleteDocuments(array($node->nid));
+          drupal_set_message('Content removed from ElasticSearch index');
+        }
+      }
+      catch (Exception $e) {
+        drupal_set_message('Cannot remove content from index due to ElasticSearch not being available at the moment.', 'error');
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_node_delete().
+ *
+ * @inheritdoc
+ */
+function zsearch_node_delete($node) {
+  try {
+    $connector = NodeElasticsearchConnector::loadElasticSearchConnector($node);
+    if (isset($connector)) {
+      $connector->deleteDocuments(array($node->nid));
+      drupal_set_message('Content removed from ElasticSearch index');
+    }
+  }
+  catch (Exception $e) {
+    drupal_set_message('Cannot remove content from index due to ElasticSearch not being available at the moment.', 'error');
+  }
+}
+
+/**
+ * Provide content for a field as part of the content load in search results.
+ *
+ * @param object $node
+ *   Node loaded from id passed in url arg.
+ * @param string $field_name
+ *   Field name to render.
+ */
+function _zsearch_get_deferred_content($node, $field_name) {
+  $info = field_info_instance('node', $field_name, 'tour');
+  $items = field_view_field('node', $node, $field_name, $info['display']['search_teaser']);
+
+  if (isset($items[0])) {
+    $item = $items[0]['#item'];
+    $value = field_view_value('node', $node, $field_name, $item, $info['display']['search_teaser']);
+    $render = render($value);
+    if ($field_name === 'field_travel_company') {
+      $render = _zsearch_get_company_rating($render);
+    }
+  }
+  else {
+    $render = FALSE;
+  }
+  print($render);
+  exit();
+}
+
+/**
+ * Get Company Rating for Tour.
+ *
+ * @param int $nid
+ *   Node Id.
+ *
+ * @return string
+ *   Formatted Fivestar rating html.
+ */
+function _zsearch_get_company_rating($nid) {
+  $review_data = _zfrontend_get_aggregate_review_data($nid, 'travelcompany');
+  return zictheme_average_fivestar($review_data['aggregate_rating'], NULL, 5, 'stars', 'big');
+}
+
+/**
+ * AJAX callback to get explain data.
+ *
+ * @param object $node
+ *   Node Object (tour).
+ * @param string $cache_id
+ *   Cache ID.
+ *
+ * @throws \Exception
+ */
+function _zsearch_es_explain_query($node, $cache_id) {
+  $search = ToursElasticsearchConnector::loadOrNew($cache_id);
+  $response = array('status' => 0, 'data' => 'No Cache Data');
+  if ($search->hasData()) {
+    $explain_data = $search->explainQuery($node->nid);
+    $list = array('Explain for node ' . $node->nid);
+    $search->extractExplainDescriptions($explain_data['explanation'], $list);
+    $response = array('status' => 1, 'data' => implode('<br>', $list));
+  }
+  drupal_json_output($response);
+}
+
+/**
+ * AJAX callback to rate search results.
+ *
+ * @param int $rating
+ *   Rating value.
+ * @param string $cache_id
+ *   Cache ID.
+ *
+ * @throws \Exception
+ */
+function _zsearch_es_rate_results($rating, $cache_id) {
+  $search = ToursElasticsearchConnector::loadOrNew($cache_id);
+  $response = array('status' => 0, 'data' => 'No Cache Data');
+  if ($rating === 'up' || $rating === 'down') {
+    $result = $search->logRating($rating);
+    if ($result) {
+      $response = array('status' => 1, 'data' => $rating . 'vote registered');
+    }
+    else {
+      $response = array('status' => 0, 'data' => $rating . 'vote not registered');
+    }
+  }
+  drupal_json_output($response);
+}
+
+/**
+ * Override form to confirm index deletion.
+ *
+ * @param array $form
+ *   Form array.
+ * @param array $form_state
+ *   Form State array.
+ * @param string $form_id
+ *   Form ID.
+ */
+function zsearch_form_elasticsearch_connector_cluster_indices_delete_alter(array &$form, array &$form_state, $form_id) {
+  $form['#submit'][] = 'zsearch_cluster_indices_delete_submit';
+}
+
+/**
+ * Redirect after deleting an index.
+ *
+ * @param array $form
+ *   Form array.
+ * @param array $form_state
+ *   Form State array.
+ */
+function zsearch_cluster_indices_delete_submit(array $form, array &$form_state) {
+  if (isset($form_state['redirect'])) {
+    $form_state['redirect'] = 'admin/config/zicasso/zsearch';
+  }
+}
+
+/**
+ * Implements hook_preprocess_page().
+ */
+function zsearch_preprocess_html(&$variables) {
+  // Set full width on search page.
+  if (isset($variables['page']['content']['system_main']['search'])) {
+    $variables['classes_array'][] = 'page-full-width';
+  }
+}
+
+/**
+ * Get LTL Search Form.
+ *
+ * @return string
+ *   Rendered form.
+ */
+function zsearch_get_ltl_form() {
+  module_load_include('inc', 'zsearch', 'zsearch.page');
+  $form = drupal_get_form('zsearch_elasticsearch_ltl_form');
+  return render($form);
+}

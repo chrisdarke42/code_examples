@@ -1,0 +1,68 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function nygb_structured_data_schema() {
+  $schema['structured_data'] = array(
+    'description' => 'The base table for Collection Structured Data.',
+    'fields' => array(
+      'sid' => array(
+        'description' => 'The primary identifier for an entry.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE),
+      'collection_id' => array(
+        'description' => 'The node id of the parent collection.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE),
+      'fid' => array(
+        'description' => 'The file id of the parent collection file.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE),
+      'page_number' => array(
+        'description' => 'The page number.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE),
+      'data' => array(
+        'description' => 'The JSON encoded data',
+        'type' => 'text',
+        'size' => 'big',
+        ),
+    ),
+    'primary key' => array('sid'),
+  );
+  return $schema;
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function nygb_structured_data_uninstall() {
+  $field_instance = field_info_instances('structured_data', 'structured_data');
+  foreach ($field_instance as $field_data) {
+    field_delete_instance($field_data);
+  }
+}
+
+/**
+ * Build the required Collection Node field.
+ */
+function nygb_structured_data_update_7100() {
+  nygb_structured_data_fields_extra();
+}
+
+
+
+
+
+
+
+
+
+
+
+

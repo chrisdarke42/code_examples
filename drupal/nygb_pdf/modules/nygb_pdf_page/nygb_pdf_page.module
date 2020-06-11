@@ -1,0 +1,419 @@
+<?php
+
+/**
+ * Implements hook_admin_paths().
+ */
+function nygb_pdf_page_admin_paths() {
+  $paths = array(
+    'node/*/pdfs' => TRUE,
+    'node/*/pdfs/*' => TRUE,
+  );
+  return $paths;
+}
+
+function nygb_pdf_page_menu() {
+  $items = array();
+
+  $items['node/%node/pdfs'] = array(
+    'title' => 'PDF Page Data',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('nygb_pdf_page_manage_files', 1),
+    'file' => 'nygb_pdf_page.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'access callback' => 'nygb_collection_admin_link_access',
+    'access arguments' => array('update', 1),
+    'weight' => 100,
+  );
+
+  $items['node/%node/pdfs/%/%'] = array(
+    'title' => 'PDF Page Data',
+    'page callback' => 'nygb_pdf_page_pdf_operations',
+    'page arguments' => array(1, 4, 3),
+    'access arguments' => array('access devel information'),
+    'file' => 'nygb_pdf_page.admin.inc',
+    'type' => MENU_CALLBACK,
+    'weight' => 101,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_entity_info().
+ */
+function nygb_pdf_page_entity_info() {
+  return array(
+    'pdf_pages' => array(
+      'label' => t('PDF Page'),
+      'base table' => 'pdf_pages',
+      'entity keys' => array(
+        'id' => 'pid',
+      ),
+      'entity class' => 'Entity',
+      'fieldable' => TRUE,
+      'controller class' => 'EntityAPIController',
+      'label callback' => 'entity_class_label',
+      'uri callback' => 'entity_class_uri',
+      'view modes' => array(
+        'full' => array(
+          'label' => t('Default'),
+          'custom settings' => FALSE,
+        ),
+      ),
+      'module' => 'nygb_pdf_page',
+    ),
+  );
+}
+
+/**
+ * Implements hook_entity_property_info_alter().
+ */
+function nygb_pdf_page_entity_property_info_alter(&$info) {
+  $properties = &$info['pdf_pages']['properties'];
+  $properties['page_contents'] = array(
+    'label' => t('Page Contents'),
+    'type' => 'text',
+    'description' => t('The contents of the page from Text data.'),
+  );
+
+}
+
+/**
+ * Implements hook_enable().
+ */
+function nygb_pdf_page_enable() {
+  nygb_pdf_page_fields_extra();
+}
+
+/**
+ * Call for extra fields.
+ */
+function nygb_pdf_page_fields_extra() {
+  module_load_include('inc', 'nygb_pdf_page', 'includes/nygb_pdf_page.fields');
+  _nygb_pdf_page_create_extra_fields();
+}
+
+/**
+ * Implements hook_search_api_item_type_info().
+ */
+function nygb_pdf_page_search_api_item_type_info() {
+  // Copied from search_api_search_api_item_type_info().
+  $types['pdf_pages'] = array(
+    'name' => 'Collection File Pages',
+    'datasource controller' => 'NygbPdfPageDataSourceController',
+    'entity_type' => 'pdf_pages',
+  );
+
+  return $types;
+}
+
+function nygb_pdf_page_entity_insert($entity, $type) {
+  nygb_pdf_page_entity_update($entity, $type);
+}
+
+/**
+ * Implements hook_entity_update().
+ *
+ * @param $entity
+ * @param $type
+ */
+function nygb_pdf_page_entity_update($entity, $type) {
+  if ($type === 'file' && $entity->type === 'collection_file') {
+    $language = $entity->language ?? LANGUAGE_NONE;
+    $collection = field_get_items('file', $entity, 'field_collection', $language);
+    if (isset($collection)) {
+      $collection_id = reset($collection)['target_id'];
+      $indexable = _nygb_pdf_page_collection_indexable(node_load($collection_id));
+      // Check that the Collection is of a type that has searchable PDF data.
+      if ($indexable) {
+        $original_page_num = isset($entity->original->field_num_pages[LANGUAGE_NONE][0]['value']) ? $entity->original->field_num_pages[LANGUAGE_NONE][0]['value'] : 0;
+        $latest_page_num = isset($entity->field_num_pages[LANGUAGE_NONE][0]['value']) ? $entity->field_num_pages[LANGUAGE_NONE][0]['value'] : 0;
+        if ($latest_page_num !== $original_page_num) {
+          _nygb_pdf_page_set_pages($entity->fid, $latest_page_num);
+        }
+      }
+    }
+    else {
+      watchdog('NYGB Pdf Pages', 'Collection File %fid inserted or updated without valid Collection', array('%fid' => $entity->fid));
+    }
+  }
+}
+
+function nygb_pdf_page_entity_delete($entity, $type) {
+  if ($type === 'file' && $entity->type === 'collection_file') {
+    _nygb_pdf_page_delete_all($entity->fid);
+  }
+}
+
+/**
+ * @param $fid
+ * @param bool|int $pages
+ *   False if all pages should be rendered
+ *
+ * @return bool|int|void
+ */
+function _nygb_pdf_page_set_pages($fid, $pages = FALSE, $reset = FALSE) {
+  if ($pages === FALSE) {
+    // Look up page number from entity.
+    $file = entity_load_single('file', $fid);
+    if ($file->type !== 'collection_file') {
+      return;
+    }
+    $pages = isset($file->field_num_pages[LANGUAGE_NONE][0]['value']) ? $file->field_num_pages[LANGUAGE_NONE][0]['value'] : 0;
+    if ($pages === 0) {
+      return FALSE;
+    }
+  }
+  if ($reset) {
+    _nygb_pdf_page_delete_all($fid);
+    $page_count = 0;
+  } else {
+    $page_count = _nygb_pdf_page_get_page_count($fid);
+  }
+
+  $diff = $pages - $page_count;
+  if ($diff === 0) {
+    return 0;
+  }
+  return _nygb_pdf_page_number_update($fid, $diff);
+}
+
+function _nygb_pdf_page_delete_all($fid) {
+  $pids = db_select('pdf_pages', 'pp')
+    ->fields('pp', array('pid'))
+    ->condition('pp.fid', $fid)
+    ->execute()
+    ->fetchCol();
+  entity_delete_multiple('pdf_pages', $pids);
+  watchdog('NYGB Pdf Pages', 'Deleted all PDF pages for %fid', array('%fid' => $fid));
+  return TRUE;
+}
+
+//function nygb_pdf_page_get_pid($fid, $page) {
+//  $result = db_select('pdf_pages', 'pp')
+//    ->condition('pp.fid', $fid)
+//    ->condition('pp.page_number', $page)
+//    ->fields('pp', array('pid'))
+//    ->execute()
+//    ->fetchField();
+//  return $result;
+//}
+
+function _nygb_pdf_page_get_page_count($fid) {
+  $page_counts = &drupal_static(__FUNCTION__);
+  if (!isset($page_counts[$fid])) {
+    $page_count = db_select('pdf_pages', 'pp')
+      ->condition('pp.fid', $fid)
+      ->fields(NULL, array('field'))
+      ->countQuery()
+      ->execute()
+      ->fetchField();
+    if (is_numeric($page_count)) {
+      $page_counts[$fid] = $page_count;
+    }
+    else {
+      $page_counts[$fid] = 0;
+    }
+  }
+  return $page_counts[$fid];
+}
+
+function _nygb_pdf_page_number_update($fid, $pages) {
+  $file = entity_load_single('file', $fid);
+  $collection_nid = isset($file->field_collection[LANGUAGE_NONE][0]['target_id']) ? $file->field_collection[LANGUAGE_NONE][0]['target_id'] : NULL;
+  $current_page_count = _nygb_pdf_page_get_page_count($fid);
+  watchdog('NYGB Pdf Pages', 'Updating number of pages for %fid to %pages', array('%fid' => $fid, '%pages' => $pages));
+  if ($pages > 0) {
+    // Add in pages.
+    for($i = 1; $i <= $pages; $i++) {
+      $next_page = $current_page_count + $i;
+      $pagedata = ['fid' => ['value' => (int) $fid], 'page_number' => ['value' => (int) $next_page]];
+      _nygb_pdf_page_insert($pagedata, $collection_nid);
+    }
+  }
+  else {
+    // Remove pages.
+    $page_pids = db_select('pdf_pages', 'pp')
+      ->condition('pp.fid', $fid)
+      ->condition('pp.page_number', ($current_page_count + $pages), '>')
+      ->fields('pp', array('pid'))
+      ->execute()->fetchCol();
+    nygb_pdf_page_delete_multiple($page_pids);
+  }
+  return $pages;
+}
+
+function nygb_pdf_page_delete_multiple(array $pids) {
+  db_delete('pdf_pages')
+    ->condition('pid', $pids)
+    ->execute();
+}
+
+function _nygb_pdf_page_insert($pagedata, $collection_nid) {
+  $entity_type = 'pdf_pages';
+  $entity = entity_create($entity_type, array('type' => $entity_type));
+  foreach ($pagedata as $key => $value) {
+    $entity->$key = $value['value'];
+  }
+  $entity->save();
+  entity_save($entity_type, $entity);
+  $wrapper = entity_metadata_wrapper($entity_type, $entity);
+  $wrapper->collection_node->set((int) $collection_nid);
+  $wrapper->save();
+  $page = $pagedata['page_number']['value'] ?? 'Undefined';
+  watchdog('NYGB Pdf Pages', 'Created PDF page %page for Collection ID %cid', array('%page' => $page, '%cid' => $collection_nid));
+}
+
+function _nygb_pdf_page_update_paths($item) {
+  db_update('pdf_pages')
+  ->fields(array(
+    'path' => $item->path,
+    'text_path' => $item->text_path,
+  ))
+  ->condition('pid', $item->pid)
+  ->execute();
+}
+
+/**
+ * Implements hook_node_operations().
+ */
+function nygb_pdf_page_node_operations() {
+  $operations = array(
+    'retrack_pages' => array(
+      'label' => t('Re-track PDF Pages (Collections)'),
+      'callback' => 'nygb_pdf_page_collection_retrack',
+      'callback arguments' => array(),
+    ),
+  );
+  return $operations;
+}
+
+/**
+ * Implements hook_file_operations().
+ */
+function nygb_pdf_page_file_operations() {
+  $operations = array(
+    'retrack_pages' => array(
+      'label' => t('Re-track PDF Pages'),
+      'callback' => 'nygb_pdf_page_file_retrack',
+      'callback arguments' => array(),
+    ),
+  );
+  return $operations;
+}
+
+function nygb_pdf_page_collection_retrack(array $nodes) {
+  $files = array();
+  foreach($nodes as $nid) {
+    $collection_files = _nygb_collection_get_pdfs_by_nid($nid);
+    if (count($collection_files)) {
+      $files = array_merge($files, $collection_files);
+    }
+  }
+  nygb_pdf_page_file_retrack($files);
+}
+
+function nygb_pdf_page_file_retrack(array $files) {
+  // We use batch processing to prevent timeout when updating a large number
+  // of files.
+  if (count($files) > 10) {
+    $batch = array(
+      'operations' => array(
+        array(
+          '_nygb_pdf_page_file_retrack_batch_process',
+          array($files),
+        ),
+      ),
+      'finished' => '_nygb_pdf_page_file_retrack_batch_finished',
+      'title' => t('Processing'),
+      // We use a single multi-pass operation, so the default
+      // 'Remaining x of y operations' message will be confusing here.
+      'progress_message' => '',
+      'error_message' => t('The update has encountered an error.'),
+      // The operations do not live in the .module file, so we need to
+      // tell the batch engine which file to load before calling them.
+      'file' => drupal_get_path('module', 'nygb_pdf_page') . '/nygb_pdf_page.admin.inc',
+    );
+    batch_set($batch);
+  }
+  else {
+    $passed = 0;
+    foreach ($files as $fid) {
+      $result = _nygb_pdf_page_set_pages($fid, FALSE, TRUE);
+      if ($result === FALSE) {
+        drupal_set_message(t('An error occurred and File %fid processing did not complete.', array('%fid' => $fid)), 'error');
+        watchdog('NYGB Pdf Pages', 'PDF File %fid has no pages defined.', array('%fid' => $fid), WATCHDOG_WARNING);
+      }
+      else {
+        $passed++;
+        watchdog('NYGB Pdf Pages', 'Retracking %fid, %pages pages processed', array('%fid' => $fid, '%pages' => $result), WATCHDOG_INFO);
+      }
+    }
+    $message = format_plural($passed, '1 item successfully processed.', '@count items successfully processed.');
+    drupal_set_message($message);
+  }
+}
+
+/**
+ * Implements hook_search_api_index_items_alter().
+ */
+function nygb_pdf_page_search_api_index_items_alter(array &$items, SearchApiIndex $index) {
+  if ($index->machine_name === 'collection_files_pdf_pages') {
+    foreach($items as $item) {
+      _nygb_pdf_page_process_data($item);
+    }
+  }
+}
+
+function _nygb_pdf_page_process_data(&$item) {
+  if (!isset($item->text_path) || strlen($item->text_path) === 0) {
+    $file_array = entity_load('file', array($item->fid));
+    if (isset($file_array)) {
+      $source_file = reset($file_array);
+      preg_match('/^s3:\/\/uploads\/(.*).pdf/', $source_file->uri, $file_matches);
+      if (count($file_matches)) {
+        // This is an s3 storage location, lets check for data
+        $directory_path = 's3://text/' . $file_matches[1];
+        $name_parts = explode('/', $file_matches[1]);
+        $part_name = end($name_parts) . '-' . $item->page_number;
+        // Get file data.
+        $txt_file_uri = $directory_path . '/' . $part_name . '.txt';
+        if (file_exists($txt_file_uri)) {
+          $item->text_path = $txt_file_uri;
+          $item->path = 's3://pages/' . $file_matches[1] . '/' . $part_name . '.pdf';
+          _nygb_pdf_page_update_paths($item);
+        }
+        else {
+          return FALSE;
+        }
+      }
+    }
+  }
+  $item->page_contents = file_get_contents($item->text_path);
+}
+
+function nygb_pdf_page_elasticsearch_connector_search_api_mapping_update_alter(&$index, &$type) {
+  if ($index->machine_name === 'collection_files_pdf_pages') {
+    $type['properties']['page_contents']['term_vector'] = 'with_positions_offsets';
+  }
+}
+
+/**
+ * Determine if Collection PDFs should be indexable.
+ *
+ * @param $node
+ *
+ * @return bool
+ */
+function _nygb_pdf_page_collection_indexable($node) {
+  if ($node->type === 'collection') {
+    $category = field_get_items('node', $node, 'field_collection_type', $node->language);
+    $category_tid = reset($category)['tid'];
+    $term = taxonomy_term_load($category_tid);
+    if ($term->name === 'Image Browse') {
+      return FALSE;
+    }
+    return TRUE;
+  }
+  return FALSE;
+}

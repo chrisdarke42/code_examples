@@ -1,0 +1,520 @@
+<?php
+
+module_load_include('inc', 'nygb_search', 'inc/ElasticManager');
+module_load_include('inc', 'nygb_search', 'inc/BaseElasticsearch');
+module_load_include('inc', 'nygb_search', 'inc/FileElasticsearch');
+module_load_include('inc', 'nygb_search', 'inc/PageElasticsearch');
+module_load_include('inc', 'nygb_search', 'inc/StructuredElasticsearch');
+module_load_include('inc', 'nygb_search', 'inc/NodeElasticsearch');
+
+include_once 'nygb_search.features.inc';
+
+/**
+ * Implements hook_menu().
+ *
+ * @return mixed
+ */
+function nygb_search_menu() {
+
+  // Admin menu for search.
+  $items['admin/config/search/nygb'] = array(
+    'title' => 'NYGB Search',
+    'description' => 'Settings and utilities.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('nygb_search_admin_settings'),
+    'access arguments' => array('administer search_api'),
+    'file' => 'nygb_search.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $search_result_uri = variable_get('nygb_search_results_uri', 'online-records/search-results');
+  $items[$search_result_uri] = array(
+    'title' => 'Global Search - Results',
+    'description' => 'Search Form',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('nygb_search_results_form'),
+    'file' => 'nygb_search.page.inc',
+    'access callback' => array(TRUE),
+  );
+
+  $items[$search_result_uri . '/ocr/%'] = array(
+    'title' => 'Global Search - Text',
+    'description' => 'Search Form',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('nygb_search_global_form', 3),
+    'file' => 'nygb_search.page.inc',
+    'access callback' => array(TRUE),
+  );
+
+  $items[$search_result_uri . '/structured/%'] = array(
+    'title' => 'Global Search - Structured Data',
+    'description' => 'Search Form',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('nygb_search_global_form', 3, TRUE),
+    'file' => 'nygb_search.page.inc',
+    'access callback' => array(TRUE),
+  );
+
+  $items['admin/nygb_search/autocomplete/vocab/%taxonomy_vocabulary_machine_name'] = array(
+    'page callback' => 'nygb_search_autocomplete_callback',
+    'page arguments' => array(4),
+    'access callback' => array(TRUE),
+  );
+
+  $items['admin/nygb_search/autocomplete/vocabsubset/%taxonomy_vocabulary_machine_name/%/%'] = array(
+    'page callback' => 'nygb_search_autocomplete_subset_callback',
+    'page arguments' => array(4, 5, 6),
+    'access callback' => array(TRUE),
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_theme().
+ */
+function nygb_search_theme() {
+  $module_path = drupal_get_path('module', 'nygb_search');
+  return array(
+    'nygb_search_help' => array(
+      'template' => 'nygb-search--help',
+      'variables' => array('content' => '', 'index_name' => ''),
+      'path' => $module_path . '/templates',
+    ),
+    'nygb_search_result_title' => array(
+      'template' => 'nygb-search--result-title',
+      'variables' => array('title' => '', 'results_number' => variable_get('nygb_search_results_per_page_global', 10), 'index_name' => 'default'),
+      'path' => $module_path . '/templates',
+    ),
+  );
+}
+
+/**
+ * Implements hook_block_info().
+ */
+function nygb_search_block_info() {
+  $blocks = array();
+  $blocks['search_all_form'] = array(
+    'info' => t('Form for Search All'),
+  );
+  $blocks['search_all_form_sidebar'] = array(
+    'info' => t('Form for Search All - Sidebar'),
+  );
+  return $blocks;
+}
+
+/**
+ * Implements hook_block_view().
+ */
+function nygb_search_block_view($delta = '') {
+  $block = array();
+  switch ($delta) {
+    case 'search_all_form':
+      $nid = _nygb_search_block_params();
+      if (isset($nid)) {
+        if (!_nygb_search_collection_searchable($nid)) {
+          return;
+        }
+      }
+      module_load_include('inc', 'nygb_search', 'nygb_search.page');
+      $block['subject'] = '<none>';
+      $form = drupal_get_form('nygb_search_global_form', $nid);
+      $block['content'] = drupal_render($form);
+      break;
+    case 'search_all_form_sidebar':
+      $nid = _nygb_search_block_params();
+      module_load_include('inc', 'nygb_search', 'nygb_search.page');
+      $block['subject'] = '<none>';
+      $form = drupal_get_form('nygb_search_global_form', $nid);
+      $block['content'] = drupal_render($form);
+      break;
+  }
+  return $block;
+}
+
+/**
+ * Identify if the collection is searchable.
+ *
+ * @param integer $nid
+ *   Node Id.
+ *
+ * @return bool
+ *   Return false if not a collection or doesn't match business logic.
+ */
+function _nygb_search_collection_searchable($nid) {
+  $collection = node_load($nid);
+  if ($collection->type !== 'collection') {
+    return FALSE;
+  }
+  $wrapper = entity_metadata_wrapper('node', $collection);
+  foreach ($wrapper->field_collection_type->getIterator() as $delta => $term_wrapper) {
+    $label = $term_wrapper->name->value();
+    if ($label === 'Image Browse') {
+      return FALSE;
+    }
+  }
+  return TRUE;
+}
+
+function _nygb_search_block_params() {
+  $url = drupal_get_path_alias();
+  $collection_view_pattern = '/online-records\/collection\/\S+/m';
+  if(preg_match_all($collection_view_pattern, $url, $matches, PREG_SET_ORDER, 0)) {
+    $path = current_path();
+    list($node, $nid) = explode('/', $path);
+    if ($node === 'node' && is_numeric($nid)) {
+      return $nid;
+    }
+  }
+  return NULL;
+}
+
+function nygb_search_autocomplete_subset_callback($vocab, $collection_id, $index_key, $string) {
+  nygb_search_autocomplete_callback($vocab, $string, $collection_id, $index_key);
+}
+
+function nygb_search_autocomplete_callback($vocab, $string, $collection_id = NULL, $index_key = NULL) {
+  $matches = array();
+  $query = db_select('taxonomy_term_data', 't')
+    -> fields('t', array('tid', 'name'))
+    -> condition('vid', $vocab->vid, '=')
+    -> condition('name', $string.'%%', 'LIKE')
+    -> range(0, 10);
+
+
+  if (isset($collection_id) && isset($index_key)) {
+    $index = new FileElasticsearch($collection_id);
+    $terms = $index->getFacets($index_key);
+    $tids = array_keys($terms);
+    $query->condition('tid', $tids, 'IN');
+  }
+
+  $result = $query-> execute();
+
+  foreach ($result as $term) {
+    $matches[$term->name . " [{$term->tid}]"] = check_plain($term->name);
+  }
+  drupal_json_output($matches);
+}
+
+function nygb_search_autocomplete_validate($element, &$form_state) {
+  $value = $element['#value'];
+  $matches = [];
+  $result = preg_match('/\\[([0-9]+)\\]$/', $value, $matches);
+  if ($result > 0) {
+    $tid = $matches[$result];
+    $term = taxonomy_term_load($tid);
+    if (empty($term)) {
+      form_set_error($element['#name'], t('This value is invalid.'));
+      return;
+    }
+    $form_state['storage']['autocomplete_values'][$element['#name']] = $tid;
+    $form_state["rebuild"] = TRUE;
+  }
+}
+
+function _nygb_search_autocomplete_parse_get_params($index_key, $params, &$form_state) {
+  if (isset($params[$index_key])) {
+    // Data is set.
+    $raw = filter_xss(trim($params[$index_key]));
+    $element['#value'] = $raw;
+    $element['#name'] = $index_key;
+    nygb_search_autocomplete_validate($element,$form_state);
+    return $raw;
+  }
+  return NULL;
+}
+
+function nygb_search_elastic_terms_parse_term_alter(&$term_data, $term) {
+  if ($term->vocabulary_machine_name === 'subtitle') {
+    $label = '';
+    $parents = taxonomy_get_parents($term->tid);
+    if (count($parents)) {
+      reset($parents);
+      $parent = current($parents);
+      $label = $parent->name;
+    }
+    $term_data['label'] = $label;
+  }
+}
+
+function nygb_search_form_node_form_alter(&$form, $form_state) {
+  $type = $form['#node']->type;
+  if ($type === 'collection') {
+    $search_param_field = &$form['field_search_parameters'];
+    // Hide search param field.
+    $search_param_field['#access'] = FALSE;
+    if (_nygb_search_collection_searchable($form['#node']->nid)) {
+
+      // Deal with Structured Data.
+      $data_headers = NULL;
+      $structured_data_headers = isset($form['#node']->field_structured_data_headers[LANGUAGE_NONE]) ? $form['#node']->field_structured_data_headers[LANGUAGE_NONE][0]['value'] : NULL;
+      if (isset($structured_data_headers)) {
+        $data_headers = json_decode($structured_data_headers, TRUE);
+      }
+      $structured_data_headers_field = &$form['field_structured_data_headers'];
+      // Hide structured data headers field.
+      $structured_data_headers_field['#access'] = FALSE;
+
+
+
+      // Get values to set default values in checkboxes.
+      $current_value = $form['#node']->field_search_parameters[LANGUAGE_NONE][0]['value'];
+      $current_params = json_decode($current_value, TRUE);
+
+      // Collection File Index field management:
+      try {
+        $index = new FileElasticsearch();
+
+        // Get list of fields.
+        $fields = field_info_instances('file', 'collection_file');
+        $fields['fid'] = ['type' => 'text', 'label' => 'fid'];
+        $fields = $index->getIndexFieldMap($fields);
+        $selection_options_file = _nygb_search_parameter_options($fields, 'collection_file');
+
+
+        // Get list of fields.
+        $fields = field_info_instances('node', 'collection');
+        $fields['nid'] = ['type' => 'text', 'label' => 'nid'];
+        $fields['title'] = ['type' => 'text', 'label' => 'title'];
+        $fields = $index->getIndexFieldMap($fields, 'field_collection');
+        $selection_options_node = _nygb_search_parameter_options($fields, 'collection');
+
+        // Create Wrapper options set.
+        $form['search_params_set'] = [
+          '#type' => 'vertical_tabs',
+          '#weight' => $search_param_field['#weight'],
+        ];
+
+        if (isset($data_headers)) {
+          // Structued Data Index field management:
+          $selection_options_structured = _nygb_search_parameter_options_basic($data_headers, 'structured_data');
+          $current_values_structured = isset($current_params['structured_data']) ? $current_params['structured_data'] : [];
+          // Create Structured Data options set.
+          $form['search_params_set']['structured_data_params'] = [
+            '#type' => 'fieldset',
+            '#title' => t('Structured Data Search Settings'),
+            '#weight' => $search_param_field['#weight'],
+            '#collapsible' => TRUE,
+            '#collapsed' => FALSE,
+          ];
+
+          $form['search_params_set']['structured_data_params']['structured_data_fields'] = [
+            '#type' => 'checkboxes',
+            '#options' => $selection_options_structured,
+            '#default_value' => $current_values_structured,
+            '#title' => t('Structured Data level parameters'),
+          ];
+        }
+
+        $current_values_file = isset($current_params['collection_file']) ? $current_params['collection_file'] : [];
+        $current_values_node = isset($current_params['collection']) ? $current_params['collection'] : [];
+
+        // Create Collection File options set.
+        $form['search_params_set']['collection_file_params'] = [
+          '#type' => 'fieldset',
+          '#title' => t('Collection File Search Settings'),
+          '#weight' => $search_param_field['#weight'],
+          '#collapsible' => TRUE,
+          '#collapsed' => FALSE,
+        ];
+
+        $form['search_params_set']['collection_file_params']['collection_file_fields'] = [
+          '#type' => 'checkboxes',
+          '#options' => $selection_options_file,
+          '#default_value' => $current_values_file,
+          '#title' => t('Collection File level parameters'),
+        ];
+
+        // Create Collection options set.
+        $form['search_params_set']['collection_params'] = [
+          '#type' => 'fieldset',
+          '#title' => t('Collection Search Settings'),
+          '#weight' => $search_param_field['#weight'],
+          '#collapsible' => TRUE,
+          '#collapsed' => FALSE,
+        ];
+
+        $form['search_params_set']['collection_params']['collection_fields'] = [
+          '#type' => 'checkboxes',
+          '#options' => $selection_options_node,
+          '#default_value' => $current_values_node,
+          '#title' => t('Collection level parameters'),
+        ];
+
+        $form['#submit'][] = 'nygb_search_collection_submit';
+      } catch (Exception $e) {
+        $error = t('%error_message - Search Parameters can not be set', ['%error_message' => $e->getMessage()]);
+        drupal_set_message($error, 'error');
+      }
+    }
+    else {
+      $form['search_params_set'] = [
+        '#weight' => $search_param_field['#weight'],
+        '#markup' => t('<h3>Search Config: No Config on Image Browse type Collections</h3>'),
+      ];
+    }
+  }
+}
+
+function _nygb_search_parameter_options_basic($fields, $bundle) {
+  // Build option list.
+  $selection_options = [];
+  foreach ($fields as $field_name => $field) {
+    $selection_options[$field_name . '|' . $field . '|query'] = $field . ' (Field)';
+  }
+  return $selection_options;
+}
+
+function _nygb_search_parameter_options($fields, $bundle) {
+  // Build option list.
+  $selection_options = [];
+  foreach ($fields as $field_name => $field) {
+    $index_field = $field['index_field_name'];
+    $widget_module = isset($field['widget']['module']) ? $field['widget']['module'] : 'none';
+    switch($widget_module) {
+      case 'options':
+        $selection_options[$field_name . '|' . $index_field . '|select'] = $field['label'] . ' (Dropdown)';
+        $selection_options[$field_name . '|' . $index_field . '|facets'] = $field['label'] . ' (Facets)';
+        break;
+
+      case 'taxonomy':
+        $selection_options[$field_name . '|' . $index_field . '|autocomplete'] = $field['label'] . ' (Autocomplete)';
+        $selection_options[$field_name . '|' . $index_field . '|select'] = $field['label'] . ' (Dropdown)';
+        $selection_options[$field_name . '|' . $index_field . '|facets'] = $field['label'] . ' (Facets)';
+        break;
+
+      default:
+        $type = $field['type'];
+        $selection_options[$field_name . '|' . $index_field . '|' . $type] = $field['label'];
+        $selection_options[$field_name . '|' . $index_field . '|facets'] = $field['label'] . ' (Facets)';
+    }
+  }
+  return $selection_options;
+}
+
+function nygb_search_collection_submit($form, &$form_state) {
+  // If search params were set, encode as json and store in field.
+  $data = [];
+  if (isset($form_state['complete form']['search_params_set'])) {
+    $types = ['structured_data', 'collection_file', 'collection'];
+    foreach($types as $type) {
+      if (isset($form_state['complete form']['search_params_set'][$type .'_params'])) {
+        if (isset($form_state['complete form']['search_params_set'][$type .'_params'][$type .'_fields']['#value']) &&
+          count($form_state['complete form']['search_params_set'][$type .'_params'][$type .'_fields']['#value'])) {
+          // Merge together the settings into a json encoded array.
+          $data[$type] = array_values($form_state['complete form']['search_params_set'][$type .'_params'][$type .'_fields']['#value']);
+        }
+      }
+    }
+    $form_state['values']['field_search_parameters'][LANGUAGE_NONE][0]['value'] = json_encode($data);
+  }
+}
+
+/**
+ * Implements hook_search_api_index_update().
+ */
+function nygb_search_search_api_index_update($index) {
+  FileElasticsearch::clearIndexCache();
+}
+
+/**
+ * Implements hook_elasticsearch_connector_search_api_add_index_ALTER().
+ *
+ * @param \SearchApiIndex $index
+ * @param $params
+ */
+function nygb_search_elasticsearch_connector_search_api_add_index_alter(SearchApiIndex $index, &$params) {
+  if ($index->machine_name === 'collection_structured_data') {
+    $settings = &$params['body']['settings'];
+    $settings['analysis']['analyzer']['soundex_analyzer'] = array(
+      'tokenizer' => 'standard',
+      'filter' => array(
+        'lowercase',
+        'soundex_filter',
+      )
+    );
+    $settings['analysis']['analyzer']['metaphone_analyzer'] = array(
+      'tokenizer' => 'standard',
+      'filter' => array(
+        'lowercase',
+        'metaphone_filter',
+      )
+    );
+    $settings['analysis']['filter']['soundex_filter'] = array(
+      'type' => 'phonetic',
+      'encoder' => 'soundex',
+      'replace' => FALSE,
+    );
+    $settings['analysis']['filter']['metaphone_filter'] = array(
+      'type' => 'phonetic',
+      'encoder' => 'metaphone',
+      'replace' => FALSE,
+    );
+  }
+}
+
+function nygb_search_elasticsearch_connector_search_api_field_update_alter(SearchApiIndex $index, $properties) {
+//  $properties['data']['fields'] = array(
+//    'soundex' => array(
+//      'type' => 'nested',
+//      'analyzer' => 'soundex_analyzer',
+//    )
+//  );
+//  dpm($properties, 'properties');
+
+//  if ($index->machine_name === 'collection_structured_data') {
+//    dpm($properties, 'properties');
+//  }
+}
+
+/**
+ * Implements hook_elasticsearch_connector_search_api_mapping_update_ALTER().
+ *
+ * @param \SearchApiIndex $index
+ * @param $context
+ */
+function nygb_search_elasticsearch_connector_search_api_mapping_update_alter(SearchApiIndex $index, &$context) {
+  if ($index->machine_name === 'collection_structured_data') {
+    $context['dynamic_templates'] = [
+      ['name_processors' => [
+        'match_mapping_type' => 'string',
+        'path_match' => 'data.*_name',
+        'mapping' => [
+          'type' => 'text',
+          'fields' => [
+            'soundex' => [
+              'type' => 'text',
+              'analyzer' => 'soundex_analyzer',
+            ],
+            'metaphone' => [
+              'type' => 'text',
+              'analyzer' => 'metaphone_analyzer',
+            ],
+            'raw' => [
+              'type' => 'keyword',
+              'ignore_above' => 256,
+            ]
+          ]
+        ]
+      ]],
+      ['standard_data' => [
+        'match_mapping_type' => 'string',
+        'path_match' => 'data.*',
+        'unmatch' => '*_name',
+        'mapping' => [
+          'type' => 'text',
+          'fields' => [
+            'standard' => [
+              'type' => 'text',
+            ],
+            'raw' => [
+              'type' => 'keyword',
+              'ignore_above' => 256,
+            ]
+          ]
+        ]
+      ]
+    ]];
+  }
+
+}

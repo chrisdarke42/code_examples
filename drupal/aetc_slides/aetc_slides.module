@@ -1,0 +1,210 @@
+<?php
+
+/**
+ * @file
+ * AETC Slides module file.
+ *
+ * Mostly hooks and core drupal calls for AETC Slideshow functionality.
+ */
+
+include_once 'aetc_slides.features.inc';
+
+/**
+ * Implements hook_menu().
+ */
+function aetc_slides_menu() {
+  // Admin menu for search.
+  $items['admin/config/media/aetc_google_drive'] = array(
+    'title' => 'AETC Google Drive',
+    'description' => t('Google Drive configuration & information.'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('aetc_slides_admin_settings'),
+    'access arguments' => array('access administration pages'),
+    'file' => 'aetc_slides.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['file/%file/gdrive'] = array(
+    'title' => 'Google Drive',
+    'page callback' => 'aetc_slides_file_google_drive',
+    'page arguments' => array(1),
+    'access callback' => 'aetc_slides_google_drive_admin_link_access',
+    'access arguments' => array(1),
+    'type' => MENU_LOCAL_TASK,
+    'context' => MENU_CONTEXT_PAGE,
+    'file' => 'aetc_slides.pages.inc',
+  );
+
+  $items['file/%file/gdrive_update'] = array(
+    'title' => 'Google Drive',
+    'page callback' => 'drupal_get_form',
+    'page arguments'  => array('aetc_slides_file_google_drive_update', 1),
+    'access callback' => 'aetc_slides_google_drive_admin_link_access',
+    'access arguments' => array(1),
+    'file' => 'aetc_slides.pages.inc',
+  );
+
+  $items['resource/%/%'] = array(
+    'page callback' => 'aetc_slides_get_resource_file',
+    'page arguments' => array(1,2),
+    'type' => MENU_CALLBACK,
+    'access arguments' => array('access content'),
+    'file' => 'aetc_slides.pages.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Page Callback to check if Google Drive tab should be available on a file.
+ *
+ * @param $file
+ *
+ * @return bool
+ */
+function aetc_slides_google_drive_admin_link_access($file) {
+  if (file_entity_access('view', $file)) {
+    if (!empty($file->field_google_drive_id)) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Implements hook_admin_paths().
+ */
+function aetc_slides_admin_paths() {
+  $paths = array(
+    'file/*/gdrive' => TRUE,
+    'file/*/gdrive_update' => TRUE,
+  );
+  return $paths;
+}
+
+/**
+ * Implements hook_field_formatter_info().
+ */
+function aetc_slides_field_formatter_info() {
+  return array(
+    'aetc_slides_google_embed' => array(
+      'label' => t('Google Embed'),
+      'field types' => array('file'),
+      'multiple values' => FIELD_BEHAVIOR_DEFAULT,
+    ),
+  );
+}
+
+/**
+ * Implements hook_theme().
+ */
+function aetc_slides_theme() {
+  return array(
+    'aetc_slides_formatter_aetc_slides_google_embed' => array(
+      'variables' => array('element' => NULL),
+    ),
+  );
+}
+
+/**
+ * Theme function for 'aetc_slides_google_embed' link field formatter.
+ */
+function theme_aetc_slides_formatter_aetc_slides_google_embed($element) {
+  $file_wrapper = entity_metadata_wrapper('file', file_load($element['element']['fid']));
+  $title = $file_wrapper->field_file_title->value();
+  $filename = $title ?? $element['element']['filename'];
+  $iframe_tag = array(
+    '#tag' => 'iframe',
+    '#attributes' => array(
+      'title' => t('Google Slides Presentation of @filename. A text copy of this presentation follows this frame.', array('@filename' => $filename)),
+      'src' => $element['embed_url'],
+      'frameborder' => 0,
+      'width' => 1000,
+      'height' => 800,
+      'allowfullscreen' => 'true',
+      'mozallowfullscreen' => 'true',
+      'webkitallowfullscreen' => 'true',
+    ),
+    '#value' => '',
+    '#type' => 'html_tag',
+  );
+  return render($iframe_tag);
+}
+
+/**
+ * Implements hook_field_formatter_view().
+ */
+function aetc_slides_field_formatter_view($entity_type, $entity, $field, $instance, $langcode, $items, $display) {
+  $elements = array();
+  module_load_include('inc', 'aetc_slides', 'aetc_slides.drive');
+  foreach ($items as $delta => $item) {
+    $embed_url = aetc_slides_get_embed_url($item);
+    if (isset($embed_url)) {
+      $elements[$delta] = array(
+        '#markup' => theme('aetc_slides_formatter_'. $display['type'], array('element' => $item, 'field' => $instance, 'embed_url' => $embed_url))
+      );
+    }
+  }
+  return $elements;
+}
+
+/**
+ * Implements hook_entity_update().
+ *
+ * Detect the insert/update of a File Media type and check if it needs to be
+ * uploaded to Google Drive.
+ *
+ * @param $entity
+ * @param $type
+ */
+function aetc_slides_entity_update($entity, $type) {
+  // Updating a Slide media type.
+  dpm($entity, $type);
+  if ($type === 'file' && $entity->type === 'slide') {
+    module_load_include('inc', 'aetc_slides', 'aetc_slides.drive');
+    $file_wrapper = entity_metadata_wrapper('file', $entity);
+    $google_id = $file_wrapper->field_google_drive_id->value();
+    if (isset($entity->replace_upload)) {
+      // Replace uploaded file. Need to delete google drive entity and recreate.
+      if (isset($google_id) && aetc_slides_drive_delete($google_id)) {
+        watchdog('AETC Slides File Replace', 'Deleted google_id ' . $google_id);
+        drupal_set_message('Replaced file on Google Drive');
+      }
+      $entity = $entity->replace_upload;
+      unset($google_id);
+      $file_wrapper->field_google_drive_id->set(NULL);
+    }
+    // If there is no google drive id then this has not yet been uploaded to Google.
+    if (!isset($google_id)) {
+      watchdog('AETC Slides Media Update', 'No google ID for %fid', array('%fid' => $entity->fid));
+      if ($documentId = aetc_slides_drive_upload($entity)) {
+        // Upload was successful. Set google drive id.
+        $file_wrapper->field_google_drive_id->set($documentId);
+        // Get text copy of the file and set that to the media.
+        list($text_copy, $thumbnail_file) = aetc_slides_drive_get_values($documentId, ['text', 'thumbnail']);
+
+        if ($text_copy) {
+          $file_wrapper->field_file_text->set($text_copy);
+        }
+        if ($thumbnail_file) {
+          $file_wrapper->field_resource_thumbnail->file->set($thumbnail_file);
+        }
+        watchdog('AETC Slides Media Update', 'File %fid uploaded to google with ID %googleid', array('%fid' => $entity->fid, '%googleid' => $documentId));
+      }
+      else {
+        watchdog('AETC Slides Media Update', 'Error when trying to upload %fid', array('%fid' => $entity->fid));
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_quicktabs_alter().
+ */
+function aetc_slides_quicktabs_alter(&$quicktabs) {
+  $url_parts = explode('/', request_uri());
+  // If the Resource Type is slide-sets, override the views.
+  if ($url_parts[1] === 'resource-type' && $url_parts[2] === 'slide-sets') {
+    $quicktabs->tabs[0]['display'] = 'panel_pane_7';
+  }
+}

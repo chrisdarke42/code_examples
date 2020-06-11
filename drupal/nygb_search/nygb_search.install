@@ -1,0 +1,42 @@
+<?php
+
+/**
+ * @file
+ * Update scripts for the NYGB Search feature module.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function nygb_search_install() {
+  nygb_search_update_7108();
+}
+
+/**
+ * Implementations of hook_update_N().
+ */
+
+/**
+ * Create the Online Records node.
+ */
+function nygb_search_update_7101() {
+  $node = new StdClass();
+  $node->type = 'page';
+  $node->title = 'Online Records';
+  $node->uid = 1;
+  $node->comment = 1;
+  $node->language = LANGUAGE_NONE;
+  $node->sticky = 0;
+  $node->status = 1;
+  $node->field_hide_page_title[LANGUAGE_NONE][0]['value'] = 'No';
+  $node->path['pathauto'] = 0;
+  $node->path['alias'] = 'online-records';
+  node_save($node);
+}
+
+/**
+ * Revert the feature to pull in the block configurations.
+ */
+function nygb_search_update_7102() {
+  features_revert_module('nygb_search');
+}

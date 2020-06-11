@@ -1,0 +1,207 @@
+<?php
+
+/**
+ * Tests the functionality of the NYGB Structured Data entity.
+ */
+class NygbStructuredDataTestCase extends DrupalWebTestCase {
+  protected $privileged_user;
+
+  public static function getInfo() {
+    return array(
+      'name' => 'NYGB Structured Data',
+      'description' => 'Ensure that Structured Data gets saved correctly.',
+      'group' => 'NYGB',
+    );
+  }
+
+  public function setUp() {
+    // Enable any modules required for the test. This should be an array of
+    // module names.
+
+    $modules = func_get_args();
+    if (isset($modules[0]) && is_array($modules[0])) {
+      $modules = $modules[0];
+    }
+    $modules[] = 'file_entity';
+
+    parent::setUp($modules);
+
+    // Create and log in our privileged user.
+    $this->privileged_user = $this->drupalCreateUser(array(
+      'administer users',
+      'administer permissions',
+    ));
+
+    $this->drupalLogin($this->privileged_user);
+    module_enable(array('nygb_collection', 'nygb_structured_data', 'nygb_pdf_page'), TRUE);
+
+
+    $nid = $this->setUpCollection();
+    if ($nid) {
+      $this->setUpCollectionFile($nid);
+    }
+  }
+
+  protected function setUpCollection() {
+    $node = new stdClass();
+    $node->title = "Test Collection";
+    $node->type = "collection";
+    // Sets some defaults. Invokes hook_prepare() and hook_node_prepare().
+    node_object_prepare($node);
+    // Or e.g. 'en' if locale is enabled.
+    $node->language = LANGUAGE_NONE;
+    $node->uid = $this->privileged_user->uid;
+    $node->status = 1;
+    $node->comment = 0;
+
+    // Text field
+    $node->field_id[$node->language][]['value'] = 566;
+
+    // Save node.
+    $node = node_submit($node);
+    node_save($node);
+    if (isset($node->nid)) {
+      return $node->nid;
+    }
+    return FALSE;
+  }
+
+  protected function setUpCollectionFile($nid) {
+
+    $file = $this->getTestFile('image');
+    $file->uid = $this->privileged_user->uid;
+    $file->timestamp = REQUEST_TIME;
+    $file->status = FILE_STATUS_PERMANENT;
+    $file->type = 'collection_file';
+    file_save($file);
+
+    // Test entity ID, revision ID, and bundle.
+    $ids = entity_extract_ids('file', $file);
+
+    $file_object = entity_load('file', array($ids[0]));
+
+    $wrapper = entity_metadata_wrapper('file', $file_object[$ids[0]]);
+    $wrapper->field_id->set(37);
+    $wrapper->field_collection->set($nid);
+    $wrapper->save();
+  }
+
+  /**
+   * Retrieves a sample file of the specified type.
+   */
+  function getTestFile($type_name, $size = NULL) {
+    // Get a file to upload.
+    $file = current($this->drupalGetTestFiles($type_name, $size));
+
+    // Add a filesize property to files as would be read by file_load().
+    $file->filesize = filesize($file->uri);
+
+    return $file;
+  }
+
+
+  protected function getHeaders() {
+    $headers = ['Collection ID', 'Last Name',	'First Name',	'Other Name',	'Event Type',	'Year',	'Article Title',	'Page Number',	'Image Number',	'Collection File ID'];
+    return $headers;
+  }
+
+  protected function getData() {
+    $data['complete'] = [566, 'Abbott', 'Rachel', '', '', '', 'Records of the First Presbyterian Church of the City of New York. Births and Baptisms', '24', '26', '37'];
+    $data['missing'] = [566, 'Abbott', 'Rd.', '', '', '', 'Children of the New York City Almshouse 1807-1810', '37', '39'];
+    $data['string_id'] = ['566', 'Abbott', 'Rebecca', '', '', '', 'Records of the First Presbyterian Church of the City of New York. Births and Baptisms', '46', '44', '47'];
+    $data['no_id'] = ['Abbott', 'Rebecca', '', 'Marriage', '1761', '"Records of St. George\'s Church, Hempstead, L.I. Baptisms"', '88', '40', '53'];
+    $data['invalid_id'] = ['asdsd', 'Abbott', 'Rebecca', '', 'Marriage', '1761', '"Records of St. George\'s Church, Hempstead, L.I. Baptisms"', '88', '40', '53'];
+    return $data;
+  }
+
+  /**
+   * Testing exception handling in the PrepareData process, to handle missing or
+   * incorrect data.
+   */
+  public function testPreparingStructuredDataEntry() {
+
+    $header = $this->getHeaders();
+    $data = $this->getData();
+
+    $first = TRUE;
+    foreach($data as $key => $entry) {
+      // Check that on subsequent loops the header is already parsed.
+      if (!$first) {
+        $parsed = isset($header['parsed']);
+        $this->assertTrue($parsed, 'Header tracked over iterations.', $key);
+      }
+
+      try {
+
+        // Testing internals for Structured Data
+        $parsedData = StructuredData::prepareForStorage($header, $entry);
+        $this->verbose(print_r($parsedData, 1));
+        switch($key) {
+          case 'missing':
+          case 'no_id':
+            $this->fail('Expected Exception for mismatched arrays', $key);
+            break;
+
+          case 'invalid_id':
+            $this->fail('Expected Exception for missing Collection ID', $key);
+            break;
+        }
+      }
+      catch (Exception $e) {
+        switch($key) {
+          case 'missing':
+          case 'no_id':
+            $this->assertIdentical(substr($e->getMessage(), 0, 37), "Header and Values arrays don't match!", 'Header/Values mismatch caught', $key);
+            break;
+
+          case 'invalid_id':
+            $this->assertIdentical($e->getMessage(), "Missing Collection ID.", 'Invalid Collection ID caught', $key);
+            break;
+
+          default:
+            $this->fail('Exception thrown: ' . $e->getMessage(), $key);
+        }
+      }
+
+      // Check Header was passed through parser.
+      if ($first) {
+        $parsed = isset($header['parsed']);
+        $this->assertTrue($parsed, 'Header Ran through parsing process.', $key);
+        $first = FALSE;
+      }
+
+      // Rough check to see that the header ok.
+      $compiled_header_values = implode('', $header);
+      $header_clean = $compiled_header_values === strtolower($compiled_header_values);
+      $this->assertTrue($header_clean, 'Header should be parsed correctly.', $key);
+
+      // Check that Data was parsed.
+      $this->assertTrue($parsedData, 'JSON should be generated.', $key);
+
+    }
+  }
+
+  /**
+   * This Test simulates running an import of data from Migrate, with a creation
+   * of a Structured Data entry, and an update for a Collection.
+   */
+  public function testCreatingStructuredDataEntry() {
+
+    $header = $this->getHeaders();
+    $data = $this->getData();
+
+    // Example of inserting one row into the system, and getting back the id, plus header
+    $data_example = $data['complete'];
+    $sid = nygb_structured_data_insert($header, $data_example);
+    $sid_is_set = isset($sid);
+    $this->assertTrue($sid_is_set, 'Data is Inserted');
+
+    // Get Header values for collection::field_structured_data_headers.
+    $header_encoded = nygb_structured_data_collection_header($header);
+    $collection_wrapper = entity_metadata_wrapper('node', node_load($data_example['collection_id']));
+    $collection_wrapper->field_structured_data_headers->set($header_encoded);
+    $collection_wrapper->save();
+
+  }
+
+}

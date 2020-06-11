@@ -1,0 +1,477 @@
+<?php
+/**
+ * @file
+ * Code for the NYGB - PDF feature.
+ */
+
+include_once 'nygb_pdf.features.inc';
+
+module_load_include('inc', 'nygb_pdf', '/includes/nygb_pdf.field');
+
+/**
+ * Implements hook_menu().
+ */
+function nygb_pdf_menu() {
+
+  // Admin menu for PDFs.
+  $items['admin/config/media/nygb'] = array(
+    'title' => 'NYGB PDFs',
+    'description' => 'Settings and utilities.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('nygb_pdf_admin_settings'),
+    'access arguments' => array('administer content'),
+    'file' => 'nygb_pdf.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  // Copyright Info endpoint
+  $items['api/v1/NPcopyright.json'] = array(
+    'page callback' => 'nygb_pdf_get_copyright',
+//    'page arguments' => array(4),
+    'access callback' => array(TRUE),
+  );
+
+  // Returns the URL for the single page file so that it can be viewed using
+  // PDF Viewer.
+  $items['pdfs-filename/%/%'] = array(
+    'page callback' => 'nygb_pdf_get_file_path',
+    'page arguments' => array(1, 2),
+    'type' => MENU_CALLBACK,
+    'access callback' => 'nygb_pdf_pdf_access',
+    'access arguments' => array(1, 2),
+    'file' => 'nygb_pdf.pages.inc',
+  );
+
+  // Transmits a single page out of the PDF document. Also generates the file
+  // if not already present.
+  $items['pdfs/%/%'] = array(
+    'page callback' => 'nygb_pdf_transmit_pdf',
+    'page arguments' => array(1, 2),
+    'type' => MENU_CALLBACK,
+    'access callback' => 'nygb_pdf_pdf_access',
+    'access arguments' => array(1, 2),
+    'file' => 'nygb_pdf.pages.inc',
+  );
+
+  // Transmits the entire PDF document;
+  $items['pdfs/%'] = array(
+    'page callback' => 'nygb_pdf_transmit_pdf',
+    'page arguments' => array(1),
+    'type' => MENU_CALLBACK,
+    'access callback' => 'nygb_pdf_pdf_access',
+    'access arguments' => array(1, FALSE),
+    'file' => 'nygb_pdf.pages.inc',
+  );
+
+  // Get PDF Iframe back via JS.
+  $items['pdf-iframe/get'] = array(
+    'page callback' => 'nygb_pdf_get_pdf_iframe',
+    'page arguments' => array(),
+    'type' => MENU_CALLBACK,
+    'access arguments' => array('access content'),
+    'file' => 'nygb_pdf.pages.inc',
+  );
+
+  // Get Error page to swap out in place of the iFrame.
+  $items['pdf-iframe/error'] = array(
+    'page callback' => 'nygb_pdf_get_pdf_iframe_error',
+    'page arguments' => array(),
+    'type' => MENU_CALLBACK,
+    'access arguments' => array('access content'),
+    'file' => 'nygb_pdf.pages.inc',
+  );
+
+    // Get Collection File with Page number on end of URL
+  $items['online-records/%/%/%'] = array(
+    'page callback' => 'nygb_pdf_get_collection_file',
+    'page arguments' => array(1,2,3),
+    'type' => MENU_CALLBACK,
+    'access arguments' => array('access content'),
+    'file' => 'nygb_pdf.pages.inc',
+  );
+
+  return $items;
+}
+
+function _nygb_pdf_display_full($fid, $file = NULL) {
+  // Load the requested file.
+  if (!isset($file)) {
+    $file = file_load($fid);
+  }
+  if (!(isset($file->field_display_full_file[LANGUAGE_NONE][0]['value']) && ($file->field_display_full_file[LANGUAGE_NONE][0]['value'] == 1))) {
+    return FALSE;
+  }
+  return TRUE;
+}
+
+/**
+ * Menu access callback for nygb_get_pdf().
+ */
+function nygb_pdf_pdf_access($file_id, $page_number, $account = NULL) {
+
+  // Per the menu 'access callback' standard workflow, if the account was not
+  // passed in use the current user.
+  if (empty($account)) {
+    $account = $GLOBALS['user'];
+  }
+
+  // Load the requested file.
+  $file = file_load($file_id);
+
+  // This should not happen.
+  if (empty($file)) {
+    return FALSE;
+  }
+
+  // Before any overrides, we check if this is a full file with no display.
+  if (!$page_number) {
+    $display = _nygb_pdf_display_full($file_id, $file);
+    if (!$display) {
+      return FALSE;
+    }
+  }
+
+  // Users with these permissions have full access to all files, so skip the
+  // custom logic.
+  if (user_access('bypass file access', $account)) {
+    return TRUE;
+  }
+  elseif (user_access('administer files', $account)) {
+    return TRUE;
+  }
+
+  // By default, the 'member' role is required for all file access.
+  $member_role = user_role_load_by_name('Member');
+  $access = $member_role->rid;
+
+  // Check the file's access level.
+  if (!empty($file->field_file_access[LANGUAGE_NONE][0]['value'])) {
+    if (is_numeric($file->field_file_access[LANGUAGE_NONE][0]['value'])) {
+      $access = $file->field_file_access[LANGUAGE_NONE][0]['value'];
+    }
+  }
+
+  // If the file access is set to anonymous, just give everyone access.
+  if ($access == DRUPAL_ANONYMOUS_RID) {
+    return TRUE;
+  }
+
+  // The user has this role, so skip any other logic.
+  if (user_has_role($access, $account)) {
+    return TRUE;
+  }
+
+  $limited_role = user_role_load_by_name('Limited Access');
+  $lapsed_role = user_role_load_by_name('Lapsed');
+
+  // Work through the role hierarchy:
+  // * 26 => 'Limited Access',
+  //   If any visitor has this role, the Lapsed role, or Member role, they may
+  //   access the file.
+  if ($access == $limited_role->rid) {
+    if (user_has_role($limited_role->rid, $account)) {
+      return TRUE;
+    }
+    elseif (user_has_role($lapsed_role->rid, $account)) {
+      return TRUE;
+    }
+    elseif (user_has_role($member_role->rid, $account)) {
+      return TRUE;
+    }
+  }
+  // * 36 => 'Lapsed',
+  //   If any visitor has this role or Member role, they may access the file.
+  elseif ($access == $limited_role->rid) {
+    if (user_has_role($lapsed_role->rid, $account)) {
+      return TRUE;
+    }
+    elseif (user_has_role($member_role->rid, $account)) {
+      return TRUE;
+    }
+  }
+
+  // If nothing matches at this point, block access.
+  return FALSE;
+}
+
+/**
+ * Implements hook_file_entity_access().
+ */
+function nygb_pdf_file_entity_access($op, $file, $account) {
+  // Certain roles won't have access to view the files.
+  if ($op == 'view' || $op == 'download') {
+    if (!empty($file->fid)) {
+      if (!nygb_pdf_pdf_access($file->fid, FALSE, $account)) {
+        return FILE_ENTITY_ACCESS_DENY;
+      }
+    }
+  }
+
+  // Returning nothing from this function would have the same effect.
+  return FILE_ENTITY_ACCESS_IGNORE;
+}
+
+/**
+ * Implements hook_theme().
+ */
+function nygb_pdf_theme() {
+  $theme = array(
+    'nygb_pdf_formatter' => array(
+      'variables' => array(
+        'file' => NULL,
+        'keep_pdfjs' => NULL,
+        'load_on_view' => FALSE,
+        'width' => NULL,
+        'height' => NULL,
+        'page' => NULL,
+        'singlepage' => FALSE,
+      ),
+      'file' => 'includes/nygb_pdf.field.inc',
+    ),
+  );
+  return $theme;
+}
+
+/**
+ * Transmit a PDF.
+ *
+ * @param object $file
+ *   The file object to transmit to the visitor.
+ * @param string $transfer_method
+ *   Either 'inline' or 'attachment'.
+ */
+function nygb_pdf_transmit_file($file, $transfer_method) {
+  $headers = array(
+    'Content-Type' => 'application/pdf',
+    'Content-Length' => $file->filesize,
+    'Content-Disposition' => $transfer_method . '; filename=' . $file->filename,
+    'Cache-Control' => 'public, must-revalidate, max-age=0',
+    'Pragma' => 'public',
+    'Expires' => 'Sat, 26 Jul 1997 05:00:00 GMT',
+    'Last-Modified' => gmdate('D, d M Y H:i:s') . ' GMT'
+  );
+  watchdog('NYGB PDF TRANSMIT', print_r($file, 1));
+  file_transfer($file->uri, $headers);
+}
+
+
+/**
+ * Get S3 single page data.
+ *
+ * @param $file
+ * @param $page
+ *
+ * @return array
+ */
+function _nygb_s3_pdf_single_page($file, $page) {
+  preg_match('/^s3:\/\/uploads\/(.*).pdf/', $file->uri, $file_matches);
+  if (count($file_matches)) {
+    preg_match('/\/([^\/.]*).pdf/', $file_matches[0], $filename_parts);
+    // This is an s3 storage location, lets check for data
+    $directory_path = 's3://pages/' . $file_matches[1];
+    $filename = $filename_parts[1] . '-' . $page . '.pdf';
+
+    $uri = $directory_path . '/' . $filename;
+
+    if (is_file($uri)) {
+      // Get directory information for pagination
+      return ['filename' => $filename, 'uri' => $uri];
+    }
+    else {
+      return ['filename' => $filename, 'uri' => $uri, 'error' => TRUE];
+    }
+  }
+  return FALSE;
+}
+
+function _nygb_pdf_get_page_count($entity) {
+  $pages_field = field_get_items('file', $entity, 'field_num_pages');
+  $pages = $pages_field[0]['value'];
+  return $pages;
+}
+
+/**
+ * Implements hook_views_pre_view().
+ */
+function nygb_pdf_views_pre_view(&$view, &$display_id, &$args) {
+  if ($view->name === 'collection_file_details') {
+    $fid = _nygb_pdf_get_fid_from_url();
+    if ($fid) {
+      $args[] = $fid;
+    }
+  }
+}
+
+/**
+ * Implements hook_entity_view_alter().
+ */
+function nygb_pdf_entity_view_alter(&$build, $type) {
+  if ($type === 'file') {
+    if (($build['#bundle'] === 'collection_file') && ($build['#view_mode'] === 'selected_page')) {
+      $page = _nygb_pdf_get_page_from_url();
+      if ($page) {
+        $page_label = t('Page !num', array('!num' => $page));
+        $build['#fieldgroups']['group_single_page']->label = $page_label;
+      }
+    }
+  }
+}
+
+/**
+ * Check if the page number is defined in the URL and return it.
+ *
+ * @return bool|int
+ *   Page Number of False if no match.
+ */
+function _nygb_pdf_get_page_from_url() {
+  $path = current_path();
+  preg_match('/online-records\/.+\/.+\/(\d+)/', $path, $path_match);
+  if (count($path_match) > 1) {
+    return $path_match[1];
+  }
+  return FALSE;
+}
+
+/**
+ * Find FID from path if available.
+ *
+ * @return bool|int
+ *   Return fid or FALSE if none available.
+ */
+function _nygb_pdf_get_fid_from_url() {
+  $path = current_path();
+  preg_match('/(online-records\/.+\/.+)\/\d+/', $path, $url_matches);
+  if (count($url_matches)) {
+    $path = drupal_get_normal_path($url_matches[1]);
+  }
+  preg_match('/file\/(\d+)/', $path, $fid_matches);
+  if (count($fid_matches) > 1 && is_numeric($fid_matches[1])) {
+    $file_id = $fid_matches[1];
+    return $file_id;
+  }
+  return FALSE;
+}
+
+/**
+ * Generate a full or absolute URL based on parameters.
+ *
+ * @param int $fid
+ *   File ID.
+ * @param bool $single
+ *   Single or multi page.
+ * @param null $page
+ *   Page number.
+ *
+ * @return bool|string
+ *   False or the url of the file.
+ */
+function _nygb_pdf_generate_url($fid, $single = TRUE, $page = NULL) {
+  $file_path = 'pdfs/' . $fid;
+  if (isset($page) && $single) {
+    $file_path .= '/' . $page;
+  }
+  if ($router_item = menu_get_item($file_path)) {
+    if ($router_item['access']) {
+      $attributes = [];
+      if ($single) {
+        $attributes['absolute'] = TRUE;
+      }
+      elseif (isset($page)) {
+        $attributes['fragment'] = 'page=' . $page;
+      }
+      return url($file_path, $attributes);
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Generate the URL for the src of the iframe.
+ *
+ * @param string $url
+ *   URL of the file.
+ *
+ * @return string
+ *   The URL of the viewer with encoded file URL.
+ */
+function _nygb_pdf_generate_source_url($url) {
+  preg_match('/(#page=\d+)$/', $url, $page_data);
+  $fragment = '';
+  if (count($page_data)) {
+    list($url, $other) = preg_split('/(#page=\d+)$/', $url);
+    $fragment = $page_data[1];
+  }
+  $local_path = drupal_get_path('module', 'nygb_pdf') . '/pdf_viewer';
+  return file_create_url($local_path . '/viewer.html') . '?file=' . rawurlencode($url) . $fragment;
+}
+
+/**
+ * Implements hook_cron().
+ */
+function nygb_pdf_cron() {
+  $config = _s3fs_get_config();
+  _s3fs_refresh_cache($config);
+}
+
+function nygb_pdf_get_copyright() {
+  $response = [];
+  $copyright = variable_get('nygb_pdf_copyright_info', '');
+  $response['text'] = $copyright;
+  drupal_json_output($response);
+}
+
+/**
+ * Display PDF Iframe Error
+ *
+ * @param null $error
+ * @param bool $exit
+ *
+ */
+function nygb_pdf_get_pdf_iframe_error($error = NULL, $exit = TRUE) {
+  if (!isset($error)) {
+    $data = $_POST;
+    if (isset($data['error'])) {
+      if (strpos($data['error'], 'Unexpected server response') !== FALSE) {
+        $error = 403;
+      }
+    }
+  }
+
+  if ($error === 403) {
+    watchdog('access denied', check_plain($_GET['q']), NULL, WATCHDOG_WARNING);
+
+    // Keep old path for reference, and to allow forms to redirect to it.
+    if (!isset($_GET['destination'])) {
+
+      // Make sure that the current path is not interpreted as external URL.
+      if (!url_is_external($_GET['q'])) {
+        $_GET['destination'] = $_GET['q'];
+      }
+    }
+    $path = drupal_get_normal_path(variable_get('site_403', ''));
+    if ($path && $path != $_GET['q']) {
+
+      // Custom 403 handler. Set the active item in case there are tabs to
+      // display or other dependencies on the path.
+      menu_set_active_item($path);
+      $return = menu_execute_active_handler($path, FALSE);
+    }
+    if (empty($return) || $return == MENU_NOT_FOUND || $return == MENU_ACCESS_DENIED) {
+
+      // Standard 403 handler.
+      drupal_set_title(t('Access denied'));
+      $return = t('You are not authorized to access this page.');
+    }
+    $output = $return;
+    if (is_array($return)) {
+      if (isset($return['nodes'])) {
+        $node = reset($return['nodes']);
+        $output = $node['body'];
+      }
+    }
+    print render($output);
+  }
+  if ($exit) {
+    exit();
+  }
+}

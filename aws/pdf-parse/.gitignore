@@ -1,0 +1,7 @@
+processed_sample.pdf
+.serverless
+handler.pyc
+node_modules/
+vendored/
+venv/
+__pycache__

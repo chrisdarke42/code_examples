@@ -1,0 +1,131 @@
+# Welcome to Serverless!
+#
+# This file is the main config file for your service.
+# It's very minimal at this point and uses default values.
+# You can always add more config options for more control.
+# We've included some commented out config examples here.
+# Just uncomment any of them to get that config option.
+#
+# For full config options, check the docs:
+#    docs.serverless.com
+#
+# Happy Coding!
+
+service: pdfParse
+
+# You can pin your service to only deploy with a specific Serverless version
+# Check out our docs for more details
+# frameworkVersion: "=X.X.X"
+
+
+plugins:
+  - serverless-python-requirements
+custom:
+  stage: ${opt:stage, 'dev'}
+  sqs-list:
+    parse:
+      local: nygb-parse-list-local
+      dev: nygb-parse-list-dev
+      qa: nygb-parse-list-qa
+      prod: nygb-parse-list-prod
+  sqs-parse-arn: ARN WOULD GO HERE:${self:custom.sqs-list.parse.${self:custom.stage}}
+  pythonRequirements:
+    dockerizePip: non-linux
+    # Set to both these to false if you need cache to clear due to changes in python libraries.
+    useDownloadCache: false
+    useStaticCache: false
+
+provider:
+  name: aws
+  runtime: python3.6
+  memorySize: 3008
+  stage: ${self:custom.stage}
+  region: us-east-1
+
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+        - "s3:*"
+      Resource: "*"
+    - Effect: "Allow"
+      Action:
+        - "sqs:*"
+      Resource: "*"
+    - Effect: Allow
+      Action: # Gives permission to DynamoDB tables in a specific region
+        - dynamodb:DescribeTable
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+      Resource: 'arn:aws:dynamodb:us-east-1:*:*'
+
+  environment:
+    sqs_parse_name: ${self:custom.sqs-list.parse.${self:custom.stage}}
+#    sqs_copyright_name: ${self:custom.sqs-list.copyright.${self:custom.stage}}
+    DOMAIN: ${file(resources/env.yml):DOMAIN.${self:custom.stage}}
+
+# you can define service wide environment variables here
+#  environment:
+#    variable1: value1
+
+# you can add packaging information here
+package:
+#  include:
+#    - include-me.py
+#    - include-me-dir/**
+  exclude:
+    - requirements.txt
+#    - exclude-me-dir/**
+
+functions:
+  pdfCreated:
+    handler: handler.initPdfParse
+    timeout: 900
+    events:
+      - s3:
+          bucket: nygb-drupal-fs-${self:provider.stage}
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: uploads/
+            - suffix: .pdf
+      - s3:
+          bucket: nygb-drupal-fs-${self:provider.stage}
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: uploads/
+            - suffix: .PDF
+
+#  pdfExecuteCopyright:
+#    handler: handler.applyPdfCopyright
+#    timeout: 200
+#    events:
+#      - sqs: ${self:custom.sqs-copyright-arn}
+
+  pdfDeleted:
+    handler: handler.pdfCleanup
+    timeout: 20
+    events:
+      - s3:
+          bucket: nygb-drupal-fs-${self:provider.stage}
+          event: s3:ObjectRemoved:*
+          rules:
+            - prefix: uploads/
+            - suffix: .pdf
+      - s3:
+          bucket: nygb-drupal-fs-${self:provider.stage}
+          event: s3:ObjectRemoved:*
+          rules:
+            - prefix: uploads/
+            - suffix: .PDF
+
+  pdfExecuteParsing:
+    handler: handler.execPdfParse
+    timeout: 900
+    events:
+      - sqs: ${self:custom.sqs-parse-arn}
+
+  debug:
+    handler: handler.debug

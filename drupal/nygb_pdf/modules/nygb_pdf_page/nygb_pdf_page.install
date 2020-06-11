@@ -1,0 +1,77 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function nygb_pdf_page_schema() {
+  $schema['pdf_pages'] = array(
+    'description' => 'The base table for pdf pages.',
+    'fields' => array(
+      'pid' => array(
+        'description' => 'The primary identifier for a page.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE),
+      'fid' => array(
+        'description' => 'The file id of the parent page.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE),
+      'page_number' => array(
+        'description' => 'The page number of this page.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE),
+      'path' => array(
+        'description' => 'The path for the pdf page',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => ''),
+      'text_path' => array(
+        'description' => 'The path for the text parsed from this page',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => ''),
+    ),
+    'unique keys' => array(
+      'pid_fid' => array('pid', 'fid'),
+      'page_number_fid' => array('page_number', 'fid')
+    ),
+    'primary key' => array('pid'),
+  );
+  return $schema;
+}
+
+
+/**
+ * Implements hook_uninstall().
+ */
+function nygb_pdf_page_uninstall() {
+  $field_instance = field_info_instances('pdf_page', 'pdf_page');
+  foreach ($field_instance as $field_data) {
+    field_delete_instance($field_data);
+  }
+}
+
+/**
+ * Build the required Collection Node field.
+ */
+function nygb_pdf_page_update_7100() {
+  nygb_pdf_page_fields_extra();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,194 @@
+<?php
+
+/**
+ * Implements hook_admin_paths().
+ */
+function nygb_structured_data_admin_paths() {
+  $paths = array(
+    'node/*/structured' => TRUE,
+    'node/*/structured/*' => TRUE,
+  );
+  return $paths;
+}
+
+/**
+ * Implements hook_entity_info().
+ */
+function nygb_structured_data_entity_info() {
+  return array(
+    'structured_data' => array(
+      'label' => t('Collection Structured Data'),
+      'base table' => 'structured_data',
+      'entity keys' => array(
+        'id' => 'sid',
+      ),
+      'entity class' => 'Entity',
+      'fieldable' => TRUE,
+      'controller class' => 'EntityAPIController',
+      // Use the default label() and uri() functions
+      'label callback' => 'entity_class_label',
+      'uri callback' => 'entity_class_uri',
+      'view modes' => array(
+        'full' => array(
+          'label' => t('Default'),
+          'custom settings' => FALSE,
+        ),
+      ),
+      'module' => 'nygb_structured_data',
+    ),
+  );
+}
+
+/**
+ * Implements hook_enable().
+ */
+function nygb_structured_data_enable() {
+  nygb_structured_data_fields_extra();
+}
+
+/**
+ * Call for extra fields.
+ */
+function nygb_structured_data_fields_extra() {
+  module_load_include('inc', 'nygb_structured_data', 'includes/nygb_structured_data.fields');
+  _nygb_structured_data_create_extra_fields();
+}
+
+/**
+ * Implements hook_menu().
+ */
+function nygb_structured_data_menu() {
+  // View a Single entry of Structured Data.
+  $items['online-records/%/%'] = [
+    'page callback' => 'nygb_structured_data_display',
+    'page arguments' => array(2),
+    'type' => MENU_CALLBACK,
+    'access arguments' => array('access content'),
+  ];
+
+  $items['node/%node/structured'] = array(
+    'title'              => 'Structured Page Data',
+    'page callback'      => '_nygb_structured_data_info',
+    'page arguments'     => array(1),
+    'access callback'    => 'nygb_collection_admin_link_access',
+    'access arguments'   => array('update', 1),
+    'file'               => 'nygb_structured_data.admin.inc',
+    'type'               => MENU_LOCAL_TASK,
+    'weight' => 100,
+  );
+
+  $items['node/%node/structured/%/%'] = array(
+    'title'              => 'Structured Page Data',
+    'page callback'      => '_nygb_structured_data_operations',
+    'page arguments'     => array(1, 4, 3),
+    'access arguments'   => array('access devel information'),
+    'file'               => 'nygb_structured_data.admin.inc',
+    'type'               => MENU_CALLBACK,
+    'weight' => 100,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_search_api_index_items_alter().
+ */
+function nygb_structured_data_search_api_index_items_alter(array &$items, SearchApiIndex $index) {
+  if ($index->machine_name === 'collection_structured_data') {
+    foreach($items as &$item) {
+      _nygb_structured_data_process_data($item);
+    }
+  }
+}
+
+function _nygb_structured_data_process_data(&$item) {
+  $data_set = json_decode($item->data, TRUE);
+  if (isset($data_set[''])) {
+    $data_set['nokey'] = $data_set[''];
+    unset($data_set['']);
+  }
+  $item->data = $data_set;
+}
+
+/**
+ * Page callback to display a collection data record.
+ *
+ * @param int $structured_data_id
+ *   The ID of the structured data record.
+ *
+ * @return array|bool
+ *   FALSE if no record was found, otherwise a render array.
+ */
+function nygb_structured_data_display($structured_data_id) {
+  $data = entity_load('structured_data', array($structured_data_id));
+  if (is_array($data) && isset($data[$structured_data_id])) {
+    $structured_data = $data[$structured_data_id];
+    $json_data = $structured_data->data;
+    $decoded_data = StructuredData::recreateHumanHeaders(json_decode($json_data, TRUE));
+
+    $rows = [];
+
+    // HTML Filter.
+    $filter = new stdClass();
+    $filter->settings = array(
+      'filter_url_length' => 496,
+    );
+
+    foreach($decoded_data as $key => $value) {
+      if (function_exists('_filter_url')) {
+        // Apply HTML filter defined above.
+        $value = _filter_url($value, $filter);
+      }
+      $rows[] = [$key, $value];
+    }
+    $content['structured_data'] = array(
+      '#type' => 'markup',
+      '#markup' => theme('table', array('rows' => $rows, 'header' => array(), 'footer' => array())),
+    );
+
+    return $content;
+  }
+  drupal_not_found();
+}
+
+/**
+ * Get structured data summary for Collection Node.
+ *
+ * @param $collection
+ */
+function _nygb_structured_data_get_data_for_collection($collection) {
+  $query = db_select('structured_data', 'sd')
+    ->fields('sd', array('fid'));
+  $query->addExpression('COUNT(sd.sid)', 'count');
+  $query->groupBy('sd.fid');
+  $query->condition('sd.collection_id', $collection->nid);
+  $result = $query->execute()->fetchAll();
+  return $result;
+}
+
+function _nygb_structured_data_get_entries($collection, $fid = null) {
+  if ($fid === 'none') {
+    $fid = null;
+  }
+  if ($fid === 'zero') {
+    $fid = 0;
+  }
+  $query = db_select('structured_data', 'sd')
+    ->fields('sd', array('sid'));
+  $query->condition('sd.collection_id', $collection->nid);
+  $query->condition('sd.fid', $fid);
+  $result = $query->execute()->fetchAll();
+  return $result;
+}
+
+function _nygb_structured_data_delete_entry($structured_entry) {
+  entity_delete('structured_data', $structured_entry->sid);
+}
+
+//function nygb_structured_data_elasticsearch_connector_search_api_index_items($index, &$params, $items) {
+//  watchdog('Elasticsearch indexing bla', $index);
+//  dpm($index, 'selected');
+//  if ($index === 'collection_structured_data') {
+//    dpm($items);
+//  }
+//}

@@ -1,0 +1,15 @@
+#search_results tr.odd {
+  background-color: #EEE;
+}
+
+#search_results td {
+  padding: 5px;
+}
+
+#search_results th {
+  padding: 5px;
+}
+
+a.search-results__view:visited {
+  color: purple;
+}
